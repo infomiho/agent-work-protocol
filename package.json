@@ -1,0 +1,62 @@
+{
+  "name": "@infomiho/agent-work-protocol",
+  "version": "0.1.0",
+  "description": "HTTP protocol for AI agents submitting structured work: capability sessions, draft PUT/PATCH with optimistic concurrency, schema validation with agent-readable diagnostics, self-served docs.",
+  "license": "MIT",
+  "author": "Mihovil Ilakovac <mihovil@ilakovac.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/infomiho/agent-work-protocol.git"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./dist/index.js",
+    "./adapters/express": "./dist/adapters/express.js",
+    "./server": "./dist/server.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "agent",
+    "ai",
+    "protocol",
+    "http",
+    "submission",
+    "standard-schema"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run check && npm run test && npm run build"
+  },
+  "peerDependencies": {
+    "express": "^4.18.0 || ^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@standard-schema/spec": "^1.0.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "publint": "^0.3.0",
+    "tsdown": "^0.15.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts"
+}
