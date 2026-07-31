@@ -32,3 +32,7 @@ const handlers = createExpressHandlers(protocol)
 - `@infomiho/agent-work-protocol`: browser-safe wire contract and prompt helpers
 - `@infomiho/agent-work-protocol/server`: the protocol engine (Node)
 - `@infomiho/agent-work-protocol/adapters/express`: Express handlers
+
+## Docs
+
+[Integration guide](docs/README.md): implementing the stores, authoring a DocumentSpec, wiring routes.
