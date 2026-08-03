@@ -1,7 +1,7 @@
 {
   "name": "@infomiho/agent-work-protocol",
   "version": "0.2.0",
-  "description": "HTTP protocol for AI agents submitting structured work: capability sessions, draft PUT/PATCH with optimistic concurrency, schema validation with agent-readable diagnostics, self-served docs.",
+  "description": "Capability-scoped HTTP protocol for agents editing assessed, revisioned JSON work.",
   "license": "MIT",
   "author": "Mihovil Ilakovac <mihovil@ilakovac.com>",
   "repository": {
@@ -17,7 +17,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "docs"
   ],
   "engines": {
     "node": ">=20.19.0"

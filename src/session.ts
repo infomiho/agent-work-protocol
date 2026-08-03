@@ -1,12 +1,43 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { sessionLifetimeMs } from './contract'
+import type { RevisionTarget } from './revision'
+
+export const sessionLifetimeMs = 24 * 60 * 60 * 1000
+export const sessionPath = 'agent/sessions'
+
+export type CapabilitySession<TAuthority> = {
+  id: string
+  expiresAt: Date
+  target: RevisionTarget
+  authority: TAuthority
+}
+
+export type SessionStore<TAuthority> = {
+  findByCapabilityHash: (capabilityHash: string) => Promise<CapabilitySession<TAuthority> | null>
+  touch: (sessionId: string) => Promise<void>
+}
+
+export type ResolvedSession<TAuthority> =
+  | { kind: 'not-found' }
+  | { kind: 'expired' }
+  | { kind: 'active'; session: CapabilitySession<TAuthority> }
+
+export const resolveSession = async <TAuthority>(
+  store: SessionStore<TAuthority>,
+  capability: string,
+  now = new Date(),
+): Promise<ResolvedSession<TAuthority>> => {
+  const session = await store.findByCapabilityHash(hashCapability(capability))
+  if (!session) return { kind: 'not-found' }
+  if (session.expiresAt <= now) return { kind: 'expired' }
+  return { kind: 'active', session }
+}
 
 export const mintCapability = (
   serverUrl: string,
   now = new Date(),
   ttlMs = sessionLifetimeMs,
 ): MintedCapability => {
-  const capability = createCapabilitySecret()
+  const capability = randomBytes(32).toString('base64url')
   return {
     capability,
     capabilityHash: hashCapability(capability),
@@ -22,54 +53,11 @@ export type MintedCapability = {
   sessionUrl: string
 }
 
-export const resolveSession = async (
-  store: SessionStore,
-  capability: string,
-  now = new Date(),
-): Promise<ResolvedSession> => {
-  const view = await store.findByCapabilityHash(hashCapability(capability))
-  if (!view) return { kind: 'not-found' }
-  if (view.session.expiresAt <= now || view.session.generation !== view.workGeneration) {
-    return { kind: 'expired' }
-  }
-  return { kind: 'active', view }
-}
-
-export type ResolvedSession =
-  | { kind: 'not-found' }
-  | { kind: 'expired' }
-  | { kind: 'active'; view: SessionView }
-
-export type SessionStore = {
-  findByCapabilityHash: (capabilityHash: string) => Promise<SessionView | null>
-  touch: (sessionId: string) => Promise<void>
-}
-
-export type SessionView = {
-  session: CapabilitySession
-  workName: string
-  // The work's current generation; a session with an older generation was revoked.
-  workGeneration: number
-  draft: { revision: number; document: unknown } | null
-}
-
-export type CapabilitySession = {
-  id: string
-  workId: string
-  generation: number
-  expiresAt: Date
-}
-
-export const sessionPath = 'agent/sessions'
+export const hashCapability = (capability: string) =>
+  createHash('sha256').update(capability).digest('hex')
 
 export const buildSessionUrl = (serverUrl: string, capability: string) =>
   buildCapabilityUrl(serverUrl, sessionPath, capability)
 
 export const buildCapabilityUrl = (baseUrl: string, path: string, capability: string) =>
   new URL(`${path}/${encodeURIComponent(capability)}`, `${baseUrl.replace(/\/$/, '')}/`).toString()
-
-// Stored only as a hash, so a database leak cannot be replayed against the API.
-const createCapabilitySecret = () => randomBytes(32).toString('base64url')
-
-export const hashCapability = (capability: string) =>
-  createHash('sha256').update(capability).digest('hex')

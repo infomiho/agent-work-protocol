@@ -1,107 +1,72 @@
 # Integration guide
 
-The library implements an HTTP protocol that lets AI agents edit work stored in your app. You implement a document definition and two storage callbacks. The library implements capability sessions, draft reads and writes, conflict detection, validation errors, and the documentation agents read.
+## Model
 
-The end user flow:
-
-1. The user clicks a button in your app and receives a prompt containing a temporary session link.
-2. The user pastes the prompt into any agent that can make HTTP requests.
-3. The agent opens the link, reads the served docs, fetches the current draft, and submits changes with PUT or PATCH.
-4. The user reviews the updated draft in your app, requests more changes, or saves.
-
-The reference integration is [codeshot.dev](https://codeshot.dev) ([source](https://github.com/infomiho/code-screenshot/tree/main/src/ambient/management/agent)), where agents design code screenshot themes.
-
-## Wiring
+`WorkModel<TDocument extends JsonValue, TArtifacts>` defines one versioned canonical JSON model:
 
 ```ts
-import { createSubmissionProtocol } from '@infomiho/agent-work-protocol/server'
-import { createExpressHandlers } from '@infomiho/agent-work-protocol/adapters/express'
-
-const protocol = createSubmissionProtocol({
-  spec,           // DocumentSpec
-  sessions,       // SessionStore
-  drafts,         // DraftStore
-  serverUrl,      // base URL for session and docs URLs
-  previewUrl,     // (capability) => URL where the agent can view its work
-  productName,    // optional, used in rendered docs and messages
-  sessionTtlMs,   // optional, default 24h
-  onAccepted,     // optional, called after a commit lands
-})
-
-const handlers = createExpressHandlers(protocol)
+const model = {
+  id: 'theme',
+  version: '1',
+  schema: {
+    decoder,    // Standard Schema decoder
+    jsonSchema, // generated from the same schema source
+  },
+  assess: (document) => ({ diagnostics, artifacts }),
+  authoring: { title, description, examples, diagnostics: definitions },
+}
 ```
+
+The decoder runs before assessment. Diagnostics use `{ severity, code, message, pointer, help? }`, where `pointer` is an RFC 6901 JSON Pointer. An assessment fails when any diagnostic has severity `error`. Artifacts stay host-side and are available to `revisionCommitted`; they are never included in protocol responses.
+
+Use `assessed` to commit every structurally decoded document, including documents with domain errors. Use `noErrors` to reject assessments containing errors.
+
+## Storage
+
+`SessionStore<TAuthority>` resolves only a SHA-256 capability hash. Its session result contains an expiry, one `RevisionTarget`, and an opaque host-defined authority value. The package does not prescribe generation counters or ownership models. Capability secrets must remain between 32 and 128 characters; invalid lengths never reach the store.
+
+`RevisionStore<TDocument, TAuthority>` has two operations:
+
+```ts
+type RevisionStore<TDocument, TAuthority> = {
+  read(command: {
+    target: RevisionTarget
+    authority: TAuthority
+    now: Date
+  }): Promise<
+    | { kind: 'read'; revision: number; document: TDocument }
+    | { kind: 'target-not-found' }
+    | { kind: 'authority-rejected'; reason: 'expired' | 'revoked' | 'forbidden' }
+  >
+  commit(command): Promise<
+    | { kind: 'committed'; revision: number }
+    | { kind: 'conflict'; currentRevision: number | null }
+    | { kind: 'target-not-found' }
+    | { kind: 'authority-rejected'; reason: 'expired' | 'revoked' | 'forbidden' }
+  >
+}
+```
+
+Both operations must verify the opaque authority at `now` before returning work or its revision. Return `expired` or `revoked` when consumers should receive 410. Return `forbidden` to conceal an inaccessible target behind 404. Revisions are non-negative safe integers.
+
+`commit` receives `{ target, authority, now, expectedRevision, document }` and is one atomic compare-and-swap. In the same transaction, verify authority, compare `expectedRevision`, compute and persist the next revision, and return that revision. The package performs an authorized early revision check for patch safety; the store remains responsible for the final authority check and CAS.
+
+`revisionCommitted` is explicitly best-effort. It runs only after a committed outcome. Thrown errors and rejected promises do not alter the HTTP response.
+
+## Routes
 
 | Route | Methods | Handler |
 | --- | --- | --- |
 | `/agent/sessions/:capability` | GET | `handlers.session` |
-| `/agent/sessions/:capability/draft` | GET, HEAD, PUT, PATCH | `handlers.draft` |
-| `/agent/docs/:doc` | GET | `handlers.docs` |
+| `/agent/sessions/:capability/work` | GET, HEAD, PUT, PATCH | `handlers.work` |
+| `/agent/docs/:model/:version/:document` | GET | `handlers.docs` |
 
-The path segments are exported as `sessionPath` and `docsPath`. Set the JSON body limit to fit your documents. Disable request logging on these routes because the capability is part of the URL.
+PUT accepts the complete canonical document as `application/json`. PATCH accepts `add`, `remove`, `replace`, `move`, `copy`, and `test` operations as `application/json-patch+json`. Both require `If-Match`, which accepts strong revision ETag lists such as `"3", "4"` and the standard `*` wildcard. Weak ETags are rejected. Representation and content-type errors take precedence over a missing precondition.
 
-Reference: [agent-api.ts](https://github.com/infomiho/code-screenshot/blob/main/src/ambient/management/agent/agent-api.ts), [agent.wasp.ts](https://github.com/infomiho/code-screenshot/blob/main/src/ambient/management/agent/agent.wasp.ts).
+The JSON member names and pointer segments `__proto__`, `prototype`, and `constructor` are reserved. This is a deliberate secure subset of RFC 6902, not unrestricted JSON Patch. Configure the host JSON parser's body limit; an exceeded host limit should use the stable `payload-too-large` problem with status 413.
 
-## Sessions
+Capability routes send `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. Disable access logging for capability URLs.
 
-`protocol.mintSession()` returns `{ capability, capabilityHash, expiresAt, sessionUrl }`. Store the hash and expiry, never the capability. Give `sessionUrl` to the user inside a prompt built with `buildAgentPrompt` from the root entry.
+Generated versioned docs are `protocol.md`, `work.md`, and `schema.json`. Pass product-specific instructions through `authoringGuidance`; the package does not invent host authoring guidance.
 
-Revocation uses a generation counter on the work: creating access increments the counter, expires existing session rows, and inserts a row with the new hash and the current generation. Incrementing the counter again invalidates the link immediately. Reference: [`createAgentAccess`](https://github.com/infomiho/code-screenshot/blob/main/src/ambient/management/ambient-operations.ts).
-
-## SessionStore
-
-```ts
-type SessionStore = {
-  findByCapabilityHash: (hash: string) => Promise<SessionView | null>
-  touch: (sessionId: string) => Promise<void>   // stamps lastUsedAt on reads
-}
-
-type SessionView = {
-  session: { id: string; workId: string; generation: number; expiresAt: Date }
-  workName: string
-  workGeneration: number    // the work's current generation
-  draft: { revision: number; document: unknown } | null
-}
-```
-
-The library compares generation and expiry. The store only fetches.
-
-## DraftStore
-
-```ts
-type DraftStore<TDocument> = {
-  commit: (command: CommitCommand<TDocument>) => Promise<CommitOutcome>
-}
-```
-
-`commit` is one transaction with two condition checks, all inputs provided in the command:
-
-1. The session row still matches `{ sessionId, requiredGeneration, expiresAt > now }`. Stamp `lastUsedAt` in the same update. On zero rows return `{ kind: 'expired' }`.
-2. The draft revision still equals `expectedRevision`. On zero rows read the current revision in the same transaction and return `{ kind: 'conflict', currentRevision }`.
-3. Write `document` at `nextRevision` with `attribution` as the author and return `{ kind: 'accepted', revision: nextRevision }`.
-
-Skipping check 1 allows revoked sessions to keep writing. Test all three outcomes: [agent-prisma-binding.test.ts](https://github.com/infomiho/code-screenshot/blob/main/tests/unit/agent-prisma-binding.test.ts).
-
-## DocumentSpec
-
-```ts
-type DocumentSpec<TDocument> = {
-  name: string
-  schema: StandardSchemaV1              // zod, valibot, arktype
-  jsonSchema: Record<string, unknown>   // derive from schema, e.g. z.toJSONSchema
-  rules: readonly DocRule[]             // constraints the schema can't express
-  validate: (input: unknown) => DocumentValidation<TDocument>
-}
-```
-
-Constraints:
-
-- `schema` runs before `validate` and must never reject a document `validate` would accept. When `validate` is the stricter authority, keep the schema looser.
-- `validate` receives the schema's output, so schema defaults and transforms apply.
-- Rules are `{ code, title, description }`. Use the code families your diagnostics carry and the rendered docs document every rejection an agent can see.
-- Diagnostics are `{ severity, code, path?, message }` with JSON Pointer paths. Diagnostics returned with a valid document reach the agent as warnings.
-
-Reference: [document-spec.ts](https://github.com/infomiho/code-screenshot/blob/main/src/ambient/document-spec.ts).
-
-## Served documentation
-
-The server renders `api.md`, `schema.md`, and `schema.json` at `{serverUrl}/agent/docs/` from the spec and the error taxonomy. The session endpoint returns a briefing that links them. There are no protocol docs to write or host separately.
+Problem responses use `application/problem+json`. Generated `protocol.md` is sourced from the same definitions as runtime responses and lists every code and status. Important extensions are `currentRevision`, `diagnostics`, `assessment`, `patchCode`, and the zero-based patch `operation` index.

@@ -1,96 +1,79 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 
-export const sessionLifetimeMs = 24 * 60 * 60 * 1000
+export type JsonPrimitive = string | number | boolean | null
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
 
-export type DocumentSpec<TDocument> = {
-  name: string
-  // Checked before validate() runs.
-  schema: StandardSchemaV1
-  // Generate from schema (e.g. z.toJSONSchema), never hand-write; served at
-  // the docs endpoint.
-  jsonSchema: Record<string, unknown>
-  // Rules the schema can't express; use the same codes validate() emits.
-  rules: readonly DocRule[]
-  // Receives the schema's output, not the raw input.
-  validate: (input: unknown) => DocumentValidation<TDocument> | Promise<DocumentValidation<TDocument>>
+export type Diagnostic = {
+  severity: 'error' | 'warning' | 'info'
+  code: string
+  message: string
+  pointer: string
+  help?: string
 }
 
-export type DocRule = {
+export type DiagnosticDefinition = {
   code: string
   title: string
   description: string
 }
 
-// Diagnostics returned with a non-null document reach agents as warnings.
-export type DocumentValidation<TDocument> = {
-  document: TDocument | null
+export type WorkAssessment<TArtifacts = never> = {
+  diagnostics: readonly Diagnostic[]
+  artifacts?: TArtifacts
+}
+
+export type WorkModel<TDocument extends JsonValue, TArtifacts = never> = {
+  id: string
+  version: string
+  schema: {
+    decoder: StandardSchemaV1<unknown, TDocument>
+    jsonSchema: Record<string, unknown>
+  }
+  assess: (document: TDocument) => WorkAssessment<TArtifacts> | Promise<WorkAssessment<TArtifacts>>
+  authoring: {
+    title: string
+    description?: string
+    examples?: readonly TDocument[]
+    diagnostics: readonly DiagnosticDefinition[]
+  }
+}
+
+export type WireAssessment = {
+  outcome: 'pass' | 'fail'
   diagnostics: readonly Diagnostic[]
 }
 
-export type Diagnostic = {
-  severity: 'error' | 'warning'
-  code: string
-  path?: string
-  message: string
+export type WorkResponse<TDocument extends JsonValue = JsonValue> = {
+  model: string
+  version: string
+  documentId: string
+  revision: number
+  document: TDocument
+  assessment: WireAssessment
+  previewUrl?: string
 }
 
-export const structuralDiagnosticCode = 'document.structure'
+export type CommitResponse<TDocument extends JsonValue = JsonValue> = {
+  revision: number
+  document: TDocument
+  assessment: WireAssessment
+  previewUrl?: string
+}
 
-export const protocolErrors = [
-  {
-    code: 'invalid_request',
-    status: 400,
-    meaning: 'The request envelope is malformed. Send exactly the documented fields.',
-  },
-  {
-    code: 'not_found',
-    status: 404,
-    meaning: 'The session URL is wrong or the session never existed.',
-  },
-  {
-    code: 'draft_not_found',
-    status: 404,
-    meaning: 'The session is valid but its draft is gone. Ask the user for a new prompt.',
-  },
-  {
-    code: 'method_not_allowed',
-    status: 405,
-    meaning: 'The draft endpoint accepts only GET, HEAD, PUT, and PATCH.',
-  },
-  {
-    code: 'draft_revision_conflict',
-    status: 409,
-    meaning: 'Someone else changed the draft. Refetch it and reapply your change to the returned currentRevision.',
-  },
-  {
-    code: 'agent_session_expired',
-    status: 410,
-    meaning: 'The session expired or was revoked. Ask the user for a new prompt.',
-  },
-  {
-    code: 'document_invalid',
-    status: 422,
-    meaning: 'The document failed validation. Fix every diagnostic and resubmit.',
-  },
-  {
-    code: 'stored_draft_invalid',
-    status: 500,
-    meaning: 'The stored draft no longer validates. Ask the user to fix the draft in the app.',
-  },
-] as const
-
-export type ProtocolErrorCode = (typeof protocolErrors)[number]['code']
-
-export type ProtocolError = {
-  error: ProtocolErrorCode
-  message: string
-  currentRevision?: number
-  diagnostics?: readonly Diagnostic[]
+export type ProblemDetails = {
+  type: string
+  title: string
+  status: number
+  detail: string
+  code: string
+  [extension: string]: JsonValue | undefined
 }
 
 export type ProtocolRequest = {
   method: string
   capability: string
+  headers?: Record<string, string | undefined>
+  contentType?: string
   body?: unknown
 }
 
@@ -99,62 +82,43 @@ export type ProtocolResponse = {
   headers: Record<string, string>
   content:
     | { type: 'json'; body: unknown }
+    | { type: 'problem'; body: ProblemDetails }
     | { type: 'markdown'; body: string }
+    | { type: 'none' }
 }
 
-export type DraftDto<TDocument> = {
-  workId: string
-  name: string
-  revision: number
-  document: TDocument
-  previewUrl: string
-  warnings?: readonly Diagnostic[]
+export const structuralDiagnosticCode = 'work.structure'
+
+export const assessmentOutcome = (assessment: Pick<WorkAssessment<unknown>, 'diagnostics'>): 'pass' | 'fail' =>
+  assessment.diagnostics.some(({ severity }) => severity === 'error') ? 'fail' : 'pass'
+
+export const isRevision = (revision: unknown): revision is number =>
+  typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0
+
+export const formatRevisionEtag = (revision: number) => {
+  if (!isRevision(revision)) throw new RangeError('Revision must be a non-negative safe integer.')
+  return `"${revision}"`
 }
 
-export type CommitDto = {
-  revision: number
-  previewUrl: string
-  warnings?: readonly Diagnostic[]
+export const parseRevisionEtag = (value: string | undefined): number | null => {
+  if (!value) return null
+  const match = /^"(0|[1-9]\d*)"$/.exec(value.trim())
+  if (!match) return null
+  const revision = Number(match[1])
+  return isRevision(revision) ? revision : null
 }
 
-export type ReplaceDraftInput = {
-  baseRevision: number
-  document: unknown
+export type RevisionPrecondition = '*' | readonly number[]
+
+export const parseRevisionPrecondition = (value: string): RevisionPrecondition | null => {
+  const trimmed = value.trim()
+  if (trimmed === '*') return '*'
+  if (!trimmed) return null
+  const revisions: number[] = []
+  for (const etag of trimmed.split(',')) {
+    const revision = parseRevisionEtag(etag)
+    if (revision === null) return null
+    revisions.push(revision)
+  }
+  return revisions
 }
-
-export type PatchDraftInput = {
-  baseRevision: number
-  patch: Record<string, unknown>
-}
-
-// Hand-written so the package has zero dependencies. The strictness is part
-// of the wire contract.
-export const parseCapabilityParam = (value: unknown): string | null =>
-  typeof value === 'string'
-    && value.length >= capabilityLength.min
-    && value.length <= capabilityLength.max
-    ? value
-    : null
-
-export const parseReplaceDraftInput = (body: unknown): ReplaceDraftInput | null => {
-  if (!isPlainObject(body) || !hasExactKeys(body, ['baseRevision', 'document'])) return null
-  if (!isRevision(body.baseRevision)) return null
-  return { baseRevision: body.baseRevision, document: body.document }
-}
-
-export const parsePatchDraftInput = (body: unknown): PatchDraftInput | null => {
-  if (!isPlainObject(body) || !hasExactKeys(body, ['baseRevision', 'patch'])) return null
-  if (!isRevision(body.baseRevision) || !isPlainObject(body.patch)) return null
-  return { baseRevision: body.baseRevision, patch: body.patch }
-}
-
-const capabilityLength = { min: 32, max: 128 } as const
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
-
-const isRevision = (value: unknown): value is number =>
-  typeof value === 'number' && Number.isInteger(value) && value >= 0
-
-const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]) =>
-  Object.keys(value).length === keys.length && keys.every((key) => key in value)

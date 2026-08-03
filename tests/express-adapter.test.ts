@@ -1,64 +1,56 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { NextFunction, Request, Response } from 'express'
 import { createExpressHandlers } from '../src/adapters/express'
-import { createSubmissionProtocol } from '../src/submission'
-import { createWorld, toySpec, type ToyDocument, type World } from './fakes'
 
-const createHandlers = (world: World) => createExpressHandlers(createSubmissionProtocol<ToyDocument>({
-  sessions: world.sessions,
-  drafts: world.drafts,
-  spec: toySpec,
-  serverUrl: 'http://api.test',
-  previewUrl: (capability) => `http://front.test/agent-preview/${capability}`,
-}))
+const response = () => ({
+  set: vi.fn(), status: vi.fn(), send: vi.fn(), json: vi.fn(), end: vi.fn(),
+})
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-const createResponse = () => {
-  const response = {
-    set: vi.fn(),
-    status: vi.fn(),
-    json: vi.fn(),
-    type: vi.fn(),
-    send: vi.fn(),
-  }
-  response.type.mockReturnValue(response)
-  return response
-}
+describe('Express adapter', () => {
+  it('passes transport fields to work and sends its response', async () => {
+    const handleWorkRequest = vi.fn(async () => ({
+      status: 200, headers: { ETag: '"2"' }, content: { type: 'json' as const, body: { revision: 2 } },
+    }))
+    const handlers = createExpressHandlers({ handleSessionRequest: vi.fn(), handleWorkRequest, handleDocsRequest: vi.fn() })
+    const res = response()
+    handlers.work({
+      method: 'PATCH', params: { capability: 'capability' }, headers: { 'if-match': '"1"' },
+      body: [{ op: 'remove', path: '/old' }], get: () => 'application/json-patch+json',
+    } as unknown as Request, res as unknown as Response, vi.fn())
+    await flush()
 
-describe('express adapter', () => {
-  it('serves the draft with private headers through the draft handler', async () => {
-    const world = createWorld()
-    const response = createResponse()
-
-    await createHandlers(world).draft(
-      { method: 'GET', params: { capability: world.capability }, body: undefined } as never,
-      response as never,
-    )
-
-    expect(response.set).toHaveBeenCalledWith('Cache-Control', 'no-store')
-    expect(response.status).toHaveBeenCalledWith(200)
-    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ workId: 'work-1' }))
+    expect(handleWorkRequest).toHaveBeenCalledWith({
+      method: 'PATCH', capability: 'capability', headers: { 'if-match': '"1"' },
+      contentType: 'application/json-patch+json', body: [{ op: 'remove', path: '/old' }],
+    })
+    expect(res.json).toHaveBeenCalledWith({ revision: 2 })
   })
 
-  it('serves markdown docs through the docs handler', async () => {
-    const world = createWorld()
-    const response = createResponse()
+  it('ends bodyless responses and rejects repeated route params', async () => {
+    const handleWorkRequest = vi.fn(async () => ({ status: 200, headers: {}, content: { type: 'none' as const } }))
+    const handlers = createExpressHandlers({ handleSessionRequest: vi.fn(), handleWorkRequest, handleDocsRequest: vi.fn() })
+    const res = response()
+    handlers.work({ method: 'HEAD', params: { capability: ['one', 'two'] }, headers: {}, get: () => undefined } as unknown as Request, res as unknown as Response, vi.fn())
+    await flush()
 
-    createHandlers(world).docs({ params: { doc: 'api.md' } } as never, response as never)
-
-    expect(response.status).toHaveBeenCalledWith(200)
-    expect(response.type).toHaveBeenCalledWith('text/markdown')
-    expect(response.send).toHaveBeenCalledWith(expect.stringContaining('submission API'))
+    expect(handleWorkRequest).toHaveBeenCalledWith(expect.objectContaining({ capability: '' }))
+    expect(res.end).toHaveBeenCalled()
+    expect(res.json).not.toHaveBeenCalled()
   })
 
-  it('treats a repeated capability param as unresolvable', async () => {
-    const world = createWorld()
-    const response = createResponse()
-
-    await createHandlers(world).draft(
-      { method: 'GET', params: { capability: [world.capability, world.capability] }, body: undefined } as never,
-      response as never,
-    )
-
-    expect(response.status).toHaveBeenCalledWith(404)
-    expect(world.state.lookups).toHaveLength(0)
+  it.each(['session', 'work', 'docs'] as const)('forwards rejected or thrown %s handlers to next', async (name) => {
+    const error = new Error(`${name} failed`)
+    const protocol = {
+      handleSessionRequest: vi.fn(async () => { throw error }),
+      handleWorkRequest: vi.fn(async () => { throw error }),
+      handleDocsRequest: vi.fn(() => { throw error }),
+    }
+    const handlers = createExpressHandlers(protocol)
+    const next = vi.fn()
+    const req = { method: 'GET', params: {}, headers: {}, get: () => undefined } as unknown as Request
+    handlers[name](req, response() as unknown as Response, next as NextFunction)
+    await flush()
+    expect(next).toHaveBeenCalledWith(error)
   })
 })

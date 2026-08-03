@@ -1,145 +1,94 @@
-import {
-  protocolErrors,
-  sessionLifetimeMs,
-  structuralDiagnosticCode,
-  type DocumentSpec,
-  type ProtocolResponse,
-} from './contract'
+import type { JsonValue, ProtocolResponse, WorkModel } from './contract'
+import { problemDefinitions, protocolProblem } from './problems'
 
 export const docsPath = 'agent/docs'
 
-export type DocsDeps = {
-  spec: Pick<DocumentSpec<unknown>, 'name' | 'jsonSchema' | 'rules'>
+export const createModelDocs = <TDocument extends JsonValue>(options: {
+  model: Pick<WorkModel<TDocument, unknown>, 'id' | 'version' | 'schema' | 'authoring'>
   serverUrl: string
   productName?: string
-  ttlMs?: number
-}
-
-export type DocsRequest = {
-  doc: string
-}
-
-export const createDocs = (deps: DocsDeps) => {
-  const files = new Map<string, DocContent>([
-    ['api.md', { type: 'markdown', body: renderApiDoc(deps) }],
-    ['schema.md', { type: 'markdown', body: renderSchemaDoc(deps) }],
-    ['schema.json', { type: 'json', body: deps.spec.jsonSchema }],
+  authoringGuidance?: string
+}) => {
+  const base = `${options.serverUrl.replace(/\/$/, '')}/${docsPath}/${encodeURIComponent(options.model.id)}/${encodeURIComponent(options.model.version)}`
+  const paths = {
+    protocol: `${base}/protocol.md`,
+    work: `${base}/work.md`,
+    schema: `${base}/schema.json`,
+  }
+  const files = new Map<string, ProtocolResponse['content']>([
+    ['protocol.md', { type: 'markdown', body: renderProtocolDoc(options, paths) }],
+    ['work.md', { type: 'markdown', body: renderWorkDoc(options, paths) }],
+    ['schema.json', { type: 'json', body: options.model.schema.jsonSchema }],
   ])
 
-  const handleDocsRequest = ({ doc }: DocsRequest): ProtocolResponse => {
-    const content = files.get(doc)
-    if (!content) {
-      return {
-        status: 404,
-        headers: { 'Cache-Control': 'no-store' },
-        content: { type: 'json', body: { error: 'not_found', message: 'Unknown document.' } },
-      }
+  const handleDocsRequest = (request: { model: string; version: string; document: string }): ProtocolResponse => {
+    if (request.model !== options.model.id || request.version !== options.model.version) return docsNotFound()
+    const content = files.get(request.document)
+    if (!content) return docsNotFound()
+    const contentType = content.type === 'markdown' ? 'text/markdown; charset=utf-8' : 'application/schema+json'
+    return {
+      status: 200,
+      headers: {
+        'Cache-Control': 'public, max-age=300',
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': contentType,
+      },
+      content,
     }
-    return { status: 200, headers: { ...publicHeaders }, content }
   }
 
-  return { handleDocsRequest }
+  return { paths, handleDocsRequest }
 }
 
-export const renderApiDoc = ({ spec, serverUrl, productName, ttlMs }: DocsDeps) => {
-  const errorRows = protocolErrors
-    .map((entry) => `| ${entry.status} | \`${entry.code}\` | ${entry.meaning} |`)
+const renderProtocolDoc = <TDocument extends JsonValue>(
+  options: { model: Pick<WorkModel<TDocument, unknown>, 'id' | 'version' | 'authoring'>; productName?: string },
+  paths: { work: string; schema: string },
+) => {
+  const problems = Object.entries(problemDefinitions)
+    .map(([code, definition]) => `| ${definition.status} | \`${code}\` | ${definition.detail} | ${definition.extensions.length ? definition.extensions.map((extension) => `\`${extension}\``).join(', ') : ''} |`)
     .join('\n')
+  return `# ${options.productName ?? options.model.authoring.title} agent work protocol
 
-  return `# ${productName ?? 'Agent'} submission API
+This capability URL grants temporary access to one work target. Never send it to another host.
 
-The temporary session URL is scoped to one draft and expires after ${formatTtl(ttlMs ?? sessionLifetimeMs)}. Never send it to another host.
+1. Read ${paths.work} and ${paths.schema}.
+2. GET {sessionUrl}/work and retain its ETag.
+3. PUT the complete canonical JSON document with Content-Type: application/json and If-Match.
+4. Or PATCH with a JSON Patch operation array, Content-Type: application/json-patch+json, and If-Match.
+5. Refetch after a 412 response before retrying.
 
-## Workflow
+GET and HEAD expose a strong revision ETag such as \`"4"\`. PUT and PATCH require \`If-Match\` and accept standard strong ETag lists or \`*\`. Weak ETags and non-revision entity tags are invalid. Successful responses contain the committed revision, canonical document, and assessment. Assessment contains \`outcome\` and \`diagnostics\`; outcome is fail when any diagnostic has severity error, otherwise pass.
 
-1. Open the session URL and read both linked references:
-   - ${serverUrl}/${docsPath}/api.md (this document)
-   - ${serverUrl}/${docsPath}/schema.md (the ${spec.name} reference)
-2. \`GET {sessionUrl}/draft\` and use its current document as the starting point.
-3. Ask the user to describe the intended direction before changing the draft.
-4. Change the document and write it back: \`PUT\` the complete document, or \`PATCH\` only the fields that change. Send the current \`baseRevision\` either way.
-5. Open the returned \`previewUrl\` in a browser and visually inspect the result after every accepted update.
+## JSON Patch profile
 
-Use HTTP tools, not repository edits.
+The protocol supports the RFC 6902 \`add\`, \`remove\`, \`replace\`, \`move\`, \`copy\`, and \`test\` operations, including array indices and \`-\` append. To keep documents safe with ordinary JavaScript objects, the JSON member names and pointer segments \`__proto__\`, \`prototype\`, and \`constructor\` are reserved and rejected.
 
-## Read the draft
+Patch failures include \`patchCode\` and, when tied to an operation, its zero-based \`operation\` index. Schema failures include \`diagnostics\`; policy failures include \`assessment\`; conflicts may include \`currentRevision\` when the store can provide it.
 
-\`GET {sessionUrl}/draft\`
+## Problems
 
-The response contains \`workId\`, \`name\`, \`revision\`, \`document\`, and \`previewUrl\`.
+Problems use \`application/problem+json\`.
 
-## Replace the draft
-
-\`PUT {sessionUrl}/draft\`
-
-Send \`Content-Type: application/json\` with the complete document:
-
-\`\`\`json
-{
-  "baseRevision": 0,
-  "document": {}
-}
-\`\`\`
-
-Set \`baseRevision\` to the revision returned by the latest GET. A successful update returns the next \`revision\` and \`previewUrl\`.
-
-## Patch the draft
-
-\`PATCH {sessionUrl}/draft\`
-
-Send \`Content-Type: application/json\` with only the fields that change (JSON Merge Patch, RFC 7396):
-
-\`\`\`json
-{
-  "baseRevision": 0,
-  "patch": { "name": "Renamed" }
-}
-\`\`\`
-
-The patch is applied to the stored draft, then the merged result is validated as a complete document. Objects merge recursively. Arrays are replaced wholesale, so send the full array when changing one entry. A \`null\` removes a key, and removing a required field makes the result invalid. Prefer PATCH for small edits and PUT when restructuring the whole document.
-
-## Preview
-
-Open the \`previewUrl\` returned by the draft and update endpoints.
-
-## Responses
-
-| Status | Code | What to do |
-| --- | --- | --- |
-${errorRows}
-
-Validation failures return \`diagnostics\`. Entries with code \`${structuralDiagnosticCode}\` come from the published JSON Schema (${serverUrl}/${docsPath}/schema.json); every other code is documented in the schema reference. A rejected update does not advance the revision. Successful responses may carry non-blocking \`warnings\` in the same diagnostic shape.
-
-A successful PUT or PATCH confirms schema validity, not visual quality.`
+| Status | Code | Meaning | Extensions |
+| --- | --- | --- | --- |
+${problems}`
 }
 
-export const renderSchemaDoc = ({ spec, serverUrl }: DocsDeps) => {
-  const ruleSections = spec.rules
-    .map((rule) => `## ${rule.title}
-
-Diagnostic codes start with \`${rule.code}\`.
-
-${rule.description}`)
-    .join('\n\n')
-
-  return `# ${spec.name} reference
-
-The JSON Schema is published at ${serverUrl}/${docsPath}/schema.json. Matching it is necessary but not sufficient: the rules below are enforced on top of it. Structural violations are reported as diagnostics with code \`${structuralDiagnosticCode}\`; every other diagnostic code belongs to one of the rules below.
-
-${ruleSections}`
+const renderWorkDoc = <TDocument extends JsonValue>(
+  options: {
+    model: Pick<WorkModel<TDocument, unknown>, 'id' | 'version' | 'authoring'>
+    authoringGuidance?: string
+  },
+  paths: { schema: string },
+) => {
+  const examples = options.model.authoring.examples?.length
+    ? `\n\n## Examples\n\n${options.model.authoring.examples.map((example) => `\`\`\`json\n${JSON.stringify(example, null, 2)}\n\`\`\``).join('\n\n')}`
+    : ''
+  const diagnostics = options.model.authoring.diagnostics.length
+    ? `\n\n## Diagnostics\n\n${options.model.authoring.diagnostics.map((definition) => `- \`${definition.code}\` ${definition.title}: ${definition.description}`).join('\n')}`
+    : ''
+  const guidance = options.authoringGuidance ? `\n\n## Authoring guidance\n\n${options.authoringGuidance}` : ''
+  return `# ${options.model.authoring.title}\n\n${options.model.authoring.description ?? ''}\n\nModel: \`${options.model.id}\` version \`${options.model.version}\`\n\nJSON Schema: ${paths.schema}${guidance}${examples}${diagnostics}`
 }
 
-const formatTtl = (ttlMs: number) => {
-  const hours = ttlMs / (60 * 60 * 1000)
-  if (Number.isInteger(hours)) return hours === 1 ? '1 hour' : `${hours} hours`
-  return `${Math.round(ttlMs / (60 * 1000))} minutes`
-}
-
-type DocContent =
-  | { type: 'markdown'; body: string }
-  | { type: 'json'; body: unknown }
-
-const publicHeaders = {
-  'Cache-Control': 'public, max-age=300',
-  'Access-Control-Allow-Origin': '*',
-} as const
+const docsNotFound = (): ProtocolResponse => protocolProblem('docs-not-found')

@@ -46,7 +46,7 @@ describe('import boundaries', () => {
   })
 
   it('keeps the root entry browser-safe', () => {
-    const browserSafe = new Set(['index.ts', 'contract.ts', 'handoff.ts'])
+    const browserSafe = new Set(['index.ts', 'contract.ts', 'handoff.ts', 'revision.ts'])
     const visited = new Set<string>()
     const queue = [join(packageDir, 'index.ts')]
     while (queue.length > 0) {

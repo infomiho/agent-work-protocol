@@ -16,18 +16,19 @@ export type SessionBriefing = {
   productName?: string
   sessionUrl: string
   expiresAt: Date
-  docs: { api: string; schema: string }
+  docs: { protocol: string; work: string; schema: string }
 }
 
 export const renderSessionBriefing = ({ productName, sessionUrl, expiresAt, docs }: SessionBriefing) =>
   `# ${productName ? `${productName} agent session` : 'Agent session'}
 
-Session URL: ${sessionUrl}
+Work URL: ${sessionUrl}/work
 Expires: ${expiresAt.toISOString()}
 
 Read and follow:
 
-- ${docs.api}
+- ${docs.protocol}
+- ${docs.work}
 - ${docs.schema}`
 
 export const maskAgentAccessUrl = (agentAccessUrl: string) => {
