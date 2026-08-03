@@ -1,6 +1,6 @@
 {
   "name": "@infomiho/agent-work-protocol",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Capability-scoped HTTP protocol for agents editing assessed, revisioned JSON work.",
   "license": "MIT",
   "author": "Mihovil Ilakovac <mihovil@ilakovac.com>",
